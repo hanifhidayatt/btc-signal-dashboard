@@ -95,7 +95,7 @@ def load_models():
 
 
 @st.cache_data(ttl=3600)
-def run_backtest(df, model_3r, model_5r):
+def run_backtest(df, _model_3r, _model_5r):
     train_end = '2022-12-31'
     test_start = '2023-01-01'
     test_end = '2024-12-31'
@@ -107,8 +107,27 @@ def run_backtest(df, model_3r, model_5r):
     X_test = X[test_mask]
     df_test = df[test_mask].copy()
 
-    probs_3r = model_3r.predict_proba(X_test)[:, 1]
-    probs_5r = model_5r.predict_proba(X_test)[:, 1]
+    # ── ADD THIS BLOCK HERE ──────────────────────────────
+    X_train = X[train_mask]
+    y_3r_train = df['Target_3R'][train_mask]
+    y_5r_train = df['Target_5R'][train_mask]
+
+    neg_3r = (y_3r_train == 0).sum()
+    pos_3r = (y_3r_train == 1).sum()
+    bt_model_3r = xgb.XGBClassifier(n_estimators=100, random_state=42,
+                                    eval_metric='logloss',
+                                    scale_pos_weight=neg_3r/pos_3r)
+    bt_model_3r.fit(X_train, y_3r_train)
+
+    neg_5r = (y_5r_train == 0).sum()
+    pos_5r = (y_5r_train == 1).sum()
+    bt_model_5r = xgb.XGBClassifier(n_estimators=100, random_state=42,
+                                    eval_metric='logloss',
+                                    scale_pos_weight=neg_5r/pos_5r)
+    bt_model_5r.fit(X_train, y_5r_train)
+
+    probs_3r = bt_model_3r.predict_proba(X_test)[:, 1]
+    probs_5r = bt_model_5r.predict_proba(X_test)[:, 1]
 
     trades = []
     last_trade_day = -999
