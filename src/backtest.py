@@ -21,7 +21,7 @@ def run_backtest(csv_path="data/BTC_USD_features.csv"):
 
     X = df[FEATURES]
     y_3r = df['Target_3R']
-    y_5r = df['Target_5R']
+    y_short_3r = df['Target_Short_3R']
 
     # Fixed date split — train on bear market, test on 2023-2024 bull run
     train_end = '2022-12-31'
@@ -39,7 +39,7 @@ def run_backtest(csv_path="data/BTC_USD_features.csv"):
     X_train = X[train_mask]
     X_test = X[test_mask]
     y_3r_train = y_3r[train_mask]
-    y_5r_train = y_5r[train_mask]
+    y_short_3r_train = y_short_3r[train_mask]
 
     # Train fresh models on training data only
     neg_3r = (y_3r_train == 0).sum()
@@ -49,16 +49,17 @@ def run_backtest(csv_path="data/BTC_USD_features.csv"):
                                  scale_pos_weight=neg_3r/pos_3r)
     model_3r.fit(X_train, y_3r_train)
 
-    neg_5r = (y_5r_train == 0).sum()
-    pos_5r = (y_5r_train == 1).sum()
-    model_5r = xgb.XGBClassifier(n_estimators=100, random_state=42,
-                                 eval_metric='logloss',
-                                 scale_pos_weight=neg_5r/pos_5r)
-    model_5r.fit(X_train, y_5r_train)
+    # 🟢 NEW: Train Short Model
+    neg_short = (y_short_3r_train == 0).sum()
+    pos_short = (y_short_3r_train == 1).sum()
+    model_short_3r = xgb.XGBClassifier(n_estimators=100, random_state=42,
+                                       eval_metric='logloss',
+                                       scale_pos_weight=neg_short/pos_short)
+    model_short_3r.fit(X_train, y_short_3r_train)
 
     # Predict on unseen test data only
     probs_3r = model_3r.predict_proba(X_test)[:, 1]
-    probs_5r = model_5r.predict_proba(X_test)[:, 1]
+    probs_short_3r = model_short_3r.predict_proba(X_test)[:, 1]
 
     # Regime breakdown
     df_test = df[test_mask].copy()
@@ -71,53 +72,49 @@ def run_backtest(csv_path="data/BTC_USD_features.csv"):
     last_trade_day = -999
     last_result = None
 
-    # --- ADD MACRO CONDITION INSIDE THE TRADING LOOP ---
+    # === UNIFIED SIMULATION LOOP ===
     for i in range(len(X_test)):
-        # Fetch the macro returns we added to features
+
+        # 1. Macro Filter
         sp500_ret = df_test['SP500_return'].iloc[i]
         dxy_ret = df_test['DXY_return'].iloc[i]
 
-        # FILTER: Skip days where the S&P 500 drops heavily (>1.5%)
-        # or the US Dollar surges heavily (>0.8%), creating market friction
+        # Skip days with massive equity sell-offs or a spiking US Dollar index
         if sp500_ret < -0.015 or dxy_ret > 0.008:
             continue
 
-        # Continue down to probability calculations...
-        p3r = probs_3r[i]
-        p5r = probs_5r[i]
-
-    for i in range(len(X_test)):
-        is_bull = df_test['Is_bull_market'].iloc[i]
-        ema_20 = df_test['EMA_20'].iloc[i]
-        ema_50 = df_test['EMA_50'].iloc[i]
-        adx_val = df_test['ADX'].iloc[i]
-
-        # Cooldown: wait 3 days after a loss
+        # 2. Cooldown Filter: wait 3 days after a loss
         if last_result == 'LOSS' and (i - last_trade_day) < 3:
             continue
 
-            # --- REVISED SIGNAL SELECTION LOGIC IN BACKTEST.PY ---
-        # --- NEW FOCUSED SIGNAL LOGIC ---
+        # 3. Model Probabilities
         p3r = probs_3r[i]
+        pshort3r = probs_short_3r[i]
 
-        # Completely ignore p5r. Only trade the highly profitable 3.5R signal.
-        if p3r >= 0.70:
-            signal = '3.5R'
+        # 4. Long vs Short Signal Logic
+        if p3r >= 0.70 and p3r > pshort3r:
+            signal = 'LONG_3.5R'
             reward = R * 3.5
             target_hit = df_test['Target_3R'].iloc[i]
+        elif pshort3r >= 0.70 and pshort3r > p3r:
+            signal = 'SHORT_3.5R'
+            reward = R * 3.5
+            target_hit = df_test['Target_Short_3R'].iloc[i]
         else:
             continue
 
+        # 5. Calculate PnL and record trade
         pnl = reward if target_hit else -R
         result = 'WIN' if target_hit else 'LOSS'
         last_trade_day = i
         last_result = result
 
+        # 🟢 FIX: Log the Short 3R confidence instead of the old 5R
         trades.append({
             'Date': df_test.index[i],
             'Signal': signal,
-            'Confidence_3R': round(p3r, 3),
-            'Confidence_5R': round(p5r, 3),
+            'Confidence_Long_3R': round(p3r, 3),
+            'Confidence_Short_3R': round(pshort3r, 3),
             'Result': result,
             'PnL_R': round(pnl / R, 2)
         })

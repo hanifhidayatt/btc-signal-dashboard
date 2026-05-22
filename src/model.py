@@ -62,18 +62,19 @@ def train_model(csv_path="data/BTC_USD_features.csv"):
 
     X = df[FEATURES]
 
-    # Train 3.5R model
-    model_3r = train_single_model(X, df['Target_3R'], "3.5R Model")
+    # Train Long 3.5R model
+    model_3r = train_single_model(X, df['Target_3R'], "Long 3.5R Model")
 
-    # Train 5R model
-    model_5r = train_single_model(X, df['Target_5R'], "5R Model")
+    # 🟢 NEW: Train Short 3.5R model
+    model_short_3r = train_single_model(
+        X, df['Target_Short_3R'], "Short 3.5R Model")
 
-    # Save both
+    # Save models
     os.makedirs("models", exist_ok=True)
     with open("models/model_3r.pkl", "wb") as f:
         pickle.dump(model_3r, f)
-    with open("models/model_5r.pkl", "wb") as f:
-        pickle.dump(model_5r, f)
+    with open("models/model_short_3r.pkl", "wb") as f:  # 🟢 NEW
+        pickle.dump(model_short_3r, f)
 
     print("\n✅ Both models saved!")
 
@@ -81,13 +82,16 @@ def train_model(csv_path="data/BTC_USD_features.csv"):
     print("\n=== Last 20 days confidence scores ===")
     last_20 = X.iloc[-20:]
     probs_3r = model_3r.predict_proba(last_20)[:, 1]
-    probs_5r = model_5r.predict_proba(last_20)[:, 1]
+    probs_short_3r = model_short_3r.predict_proba(
+        last_20)[:, 1]  # Updated variable
+
     prob_df = pd.DataFrame({
         'Date': df.index[-20:],
-        '3R_conf': probs_3r.round(3),
-        '5R_conf': probs_5r.round(3),
+        'Long_3R_conf': probs_3r.round(3),
+        'Short_3R_conf': probs_short_3r.round(3),  # Updated variable
         'Target_3R': df['Target_3R'].iloc[-20:].values,
-        'Target_5R': df['Target_5R'].iloc[-20:].values
+        # Updated variable
+        'Target_Short_3R': df['Target_Short_3R'].iloc[-20:].values
     })
     print(prob_df.to_string(index=False))
 
@@ -95,19 +99,21 @@ def train_model(csv_path="data/BTC_USD_features.csv"):
     print("\n=== Latest Signal ===")
     latest = X.iloc[[-1]]
     prob_3r = model_3r.predict_proba(latest)[0][1]
-    prob_5r = model_5r.predict_proba(latest)[0][1]
+    prob_short_3r = model_short_3r.predict_proba(
+        latest)[0][1]  # Updated variable
 
-    print(f"3.5R confidence: {prob_3r:.2%}")
-    print(f"5R confidence:   {prob_5r:.2%}")
+    print(f"Long 3.5R confidence:  {prob_3r:.2%}")
+    print(f"Short 3.5R confidence: {prob_short_3r:.2%}")
 
-    if prob_5r >= 0.25:
-        print("🚀 Signal: STRONG LONG — target 5R")
-    elif prob_3r >= 0.40:
-        print("✅ Signal: LONG — target 3.5R")
+    # Updated signal logic to match backtest thresholds
+    if prob_3r >= 0.70 and prob_3r > prob_short_3r:
+        print("🚀 Signal: LONG — target 3.5R")
+    elif prob_short_3r >= 0.70 and prob_short_3r > prob_3r:
+        print("📉 Signal: SHORT — target 3.5R")
     else:
         print("⏸️  Signal: FLAT — no trade today")
 
-    print("\n=== Feature Importance (3.5R Model) ===")
+    print("\n=== Feature Importance (Long 3.5R Model) ===")
     importance = pd.Series(
         model_3r.feature_importances_,
         index=FEATURES

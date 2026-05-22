@@ -77,11 +77,12 @@ def add_indicators(df):
     df['Lower_wick'] = df[['Close', 'Open']].min(axis=1) - df['Low']
     df['Is_green'] = (df['Close'] > df['Open']).astype(int)
 
-    # --- Forward looking R-multiple targets ---
+   # --- Forward looking R-multiple targets ---
     R = 0.02  # 2% stop loss
 
     target_3r = []
     target_5r = []
+    target_short_3r = []  # 🟢 NEW: Array for short targets
 
     closes = df['Close'].values
     highs = df['High'].values
@@ -89,33 +90,53 @@ def add_indicators(df):
 
     for i in range(len(df)):
         entry = closes[i]
-        stop = entry * (1 - R)
-        tp_3r = entry * (1 + R * 3.5)
-        tp_5r = entry * (1 + R * 5.0)
 
-        hit_3r = 0
-        hit_5r = 0
+        # LONG targets
+        stop_long = entry * (1 - R)
+        tp_long_3r = entry * (1 + R * 3.5)
+        tp_long_5r = entry * (1 + R * 5.0)
+
+        # SHORT targets
+        stop_short = entry * (1 + R)
+        tp_short_3r = entry * (1 - R * 3.5)
+
+        hit_long_3r = 0
+        hit_long_5r = 0
+        hit_short_3r = 0
 
         for j in range(i + 1, min(i + 11, len(df))):
             high = highs[j]
             low = lows[j]
 
-            if low <= stop:
+            # --- LONG LOGIC ---
+            if low <= stop_long:  # Stopped out on long
+                break
+            if high >= tp_long_5r:
+                hit_long_5r = 1
+                hit_long_3r = 1
+                break
+            if high >= tp_long_3r:
+                hit_long_3r = 1
+
+        # We need a separate loop to independently check the short logic
+        for j in range(i + 1, min(i + 11, len(df))):
+            high = highs[j]
+            low = lows[j]
+
+            # --- SHORT LOGIC ---
+            if high >= stop_short:  # Stopped out on short (price spiked up)
+                break
+            if low <= tp_short_3r:  # Price crashed, hit short take profit
+                hit_short_3r = 1
                 break
 
-            if high >= tp_5r:
-                hit_5r = 1
-                hit_3r = 1
-                break
-
-            if high >= tp_3r:
-                hit_3r = 1
-
-        target_3r.append(hit_3r)
-        target_5r.append(hit_5r)
+        target_3r.append(hit_long_3r)
+        target_5r.append(hit_long_5r)
+        target_short_3r.append(hit_short_3r)
 
     df['Target_3R'] = target_3r
     df['Target_5R'] = target_5r
+    df['Target_Short_3R'] = target_short_3r  # 🟢 NEW: Assign to dataframe
 
     # --- Merge Intermarket Macro Features ---
     macro_df = fetch_macro_features()
