@@ -9,7 +9,8 @@ FEATURES = [
     'Return_lag1', 'Return_lag2', 'Return_lag3', 'Return_lag5',
     'Price_EMA20_ratio', 'Price_EMA50_ratio', 'EMA_cross',
     'Body_size', 'Upper_wick', 'Lower_wick', 'Is_green',
-    'EMA_200', 'Is_bull_market', 'ADX', 'ATR', 'ATR_pct'
+    'EMA_200', 'Is_bull_market', 'ADX', 'ATR', 'ATR_pct',
+    'SP500_return', 'DXY_return'  # Added macro triggers
 ]
 
 R = 0.02
@@ -70,27 +71,37 @@ def run_backtest(csv_path="data/BTC_USD_features.csv"):
     last_trade_day = -999
     last_result = None
 
+    # --- ADD MACRO CONDITION INSIDE THE TRADING LOOP ---
+    for i in range(len(X_test)):
+        # Fetch the macro returns we added to features
+        sp500_ret = df_test['SP500_return'].iloc[i]
+        dxy_ret = df_test['DXY_return'].iloc[i]
+
+        # FILTER: Skip days where the S&P 500 drops heavily (>1.5%)
+        # or the US Dollar surges heavily (>0.8%), creating market friction
+        if sp500_ret < -0.015 or dxy_ret > 0.008:
+            continue
+
+        # Continue down to probability calculations...
+        p3r = probs_3r[i]
+        p5r = probs_5r[i]
+
     for i in range(len(X_test)):
         is_bull = df_test['Is_bull_market'].iloc[i]
         ema_20 = df_test['EMA_20'].iloc[i]
         ema_50 = df_test['EMA_50'].iloc[i]
         adx_val = df_test['ADX'].iloc[i]
 
-        if is_bull == 0 or ema_20 < ema_50 or adx_val < 25:
-            continue
-
         # Cooldown: wait 3 days after a loss
         if last_result == 'LOSS' and (i - last_trade_day) < 3:
             continue
 
+            # --- REVISED SIGNAL SELECTION LOGIC IN BACKTEST.PY ---
+        # --- NEW FOCUSED SIGNAL LOGIC ---
         p3r = probs_3r[i]
-        p5r = probs_5r[i]
 
-        if p5r >= 0.60:
-            signal = '5R'
-            reward = R * 5.0
-            target_hit = df_test['Target_5R'].iloc[i]
-        elif p3r >= 0.75:
+        # Completely ignore p5r. Only trade the highly profitable 3.5R signal.
+        if p3r >= 0.70:
             signal = '3.5R'
             reward = R * 3.5
             target_hit = df_test['Target_3R'].iloc[i]

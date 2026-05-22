@@ -3,6 +3,29 @@ import pandas_ta as ta
 import yfinance as yf
 
 
+def fetch_macro_features():
+    """
+    Fetch global market sentiment indicators to improve prediction confidence.
+    ^GSPC: S&P 500 Index (Tracks global risk-on appetite)
+    UUP: Invesco DB US Dollar Index Bullish Fund (Weak USD tends to benefit BTC)
+    """
+    print("Downloading Intermarket Macro Features (^GSPC, UUP)...")
+    sp500 = yf.download("^GSPC", period="10y", interval="1d", progress=False)
+    dxy = yf.download("UUP", period="10y", interval="1d", progress=False)
+
+    # Flatten multi-level columns if present in yfinance return
+    if isinstance(sp500.columns, pd.MultiIndex):
+        sp500.columns = sp500.columns.get_level_values(0)
+    if isinstance(dxy.columns, pd.MultiIndex):
+        dxy.columns = dxy.columns.get_level_values(0)
+
+    macro_df = pd.DataFrame(index=sp500.index)
+    macro_df['SP500_return'] = sp500['Close'].pct_change()
+    macro_df['DXY_return'] = dxy['Close'].pct_change()
+
+    return macro_df
+
+
 def add_indicators(df):
     # Flatten multi-level columns if needed (yfinance quirk)
     if isinstance(df.columns, pd.MultiIndex):
@@ -32,7 +55,7 @@ def add_indicators(df):
     df['BB_lower'] = bbands[bb_lower_col]
     df['BB_width'] = df['BB_upper'] - df['BB_lower']
 
-    # Calculate ATR (which was missing but required by models)
+    # Added required missing features expected by model and backtest scripts
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['ATR_pct'] = df['ATR'] / df['Close']
 
@@ -94,22 +117,34 @@ def add_indicators(df):
     df['Target_3R'] = target_3r
     df['Target_5R'] = target_5r
 
-    # Clean up dates and drop missing rows caused by indicator lookbacks
+    # --- Merge Intermarket Macro Features ---
+    macro_df = fetch_macro_features()
+    macro_df.index = pd.to_datetime(macro_df.index)
     df.index = pd.to_datetime(df.index)
+
+    # Remove timezones from indices if present to prevent join misalignment
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+    if macro_df.index.tz is not None:
+        macro_df.index = macro_df.index.tz_localize(None)
+
+    df = df.join(macro_df, how='left')
+
+    # Forward fill stock market indices to account for weekend gaps
+    df['SP500_return'] = df['SP500_return'].ffill().fillna(0)
+    df['DXY_return'] = df['DXY_return'].ffill().fillna(0)
 
     df.dropna(inplace=True)
     return df
 
 
 if __name__ == "__main__":
-    # Load raw 10y data and parse columns correctly
+    # Load raw 10y data and process
     df = pd.read_csv("data/BTC_USD_10y.csv", header=[0, 1], index_col=0)
     df = add_indicators(df)
 
-    print(df[['Close', 'RSI', 'MACD', 'EMA_20',
-          'ATR', 'Target_3R', 'Target_5R']].tail())
+    print(df[['Close', 'RSI', 'MACD', 'EMA_20', 'ATR', 'SP500_return',
+          'DXY_return', 'Target_3R', 'Target_5R']].tail())
     df.to_csv("data/BTC_USD_features.csv")
     print(f"\nSaved features — {len(df)} rows, {len(df.columns)} columns")
     print(f"3.5R trades available: {df['Target_3R'].sum()}")
