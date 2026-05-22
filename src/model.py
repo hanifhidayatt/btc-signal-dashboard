@@ -1,10 +1,11 @@
 import pandas as pd
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+import numpy as np
 import xgboost as xgb
 import pickle
 import os
 
+# ── Synchronized Feature Array ──────────────────────────────
+# This matches both your features.py output and dashboard exactly
 FEATURES = [
     'EMA_20', 'EMA_50', 'MACD', 'RSI',
     'BB_upper', 'BB_lower', 'BB_width', 'Volume_change',
@@ -12,114 +13,71 @@ FEATURES = [
     'Price_EMA20_ratio', 'Price_EMA50_ratio', 'EMA_cross',
     'Body_size', 'Upper_wick', 'Lower_wick', 'Is_green',
     'EMA_200', 'Is_bull_market', 'ADX', 'ATR', 'ATR_pct',
-    'SP500_return', 'DXY_return'  # Added macro triggers
+    'Coinbase_premium', 'Coinbase_premium_pct'
 ]
 
 
-def train_single_model(X, y, label):
-    tscv = TimeSeriesSplit(n_splits=5)
-    scores = []
-
-    # Handle class imbalance
-    neg = (y == 0).sum()
-    pos = (y == 1).sum()
-    scale = neg / pos
-
-    print(f"\n=== {label} ===")
-    print(f"Target distribution: {y.value_counts().to_dict()}")
-    print(f"scale_pos_weight: {scale:.1f}")
-
-    for train_idx, test_idx in tscv.split(X):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-        model = xgb.XGBClassifier(n_estimators=100, random_state=42,
-                                  eval_metric='logloss',
-                                  scale_pos_weight=scale)
-        model.fit(X_train, y_train)
-        score = accuracy_score(y_test, model.predict(X_test))
-        scores.append(score)
-        print(f"  Fold accuracy: {score:.2%}")
-
-    print(f"Avg Accuracy: {sum(scores)/len(scores):.2%}")
-
-    final = xgb.XGBClassifier(n_estimators=100, random_state=42,
-                              eval_metric='logloss',
-                              scale_pos_weight=scale)
-    final.fit(X, y)
-    return final
-
-
-def train_model(csv_path="data/BTC_USD_features.csv"):
-    df = pd.read_csv(csv_path, index_col=0)
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    missing = [f for f in FEATURES if f not in df.columns]
-    if missing:
-        print(f"❌ Missing features: {missing}")
-        return
-
-    X = df[FEATURES]
-
-    # Train Long 3.5R model
-    model_3r = train_single_model(X, df['Target_3R'], "Long 3.5R Model")
-
-    # 🟢 NEW: Train Short 3.5R model
-    model_short_3r = train_single_model(
-        X, df['Target_Short_3R'], "Short 3.5R Model")
-
-    # Save models
+def train_and_save_models():
+    # Ensure models directory exists
     os.makedirs("models", exist_ok=True)
+
+    # Load dataset
+    print("💾 Loading feature dataset...")
+    df = pd.read_csv("data/BTC_USD_features.csv", index_col=0)
+
+    # Filter to training set cutoff (2022-12-31) to prevent data leakage from the test period
+    train_mask = df.index <= '2022-12-31'
+    df_train = df[train_mask]
+
+    X_train = df_train[FEATURES]
+
+    # ── 1. Train Long 3.5R Model ──────────────────────────────
+    print("🚀 Training Long 3.5R Model...")
+    y_long = df_train['Target_3R']
+
+    neg_long = (y_long == 0).sum()
+    pos_long = (y_long == 1).sum()
+    scale_pos_weight_long = neg_long / pos_long if pos_long > 0 else 1.0
+
+    model_long = xgb.XGBClassifier(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.05,
+        random_state=42,
+        eval_metric='logloss',
+        scale_pos_weight=scale_pos_weight_long
+    )
+    model_long.fit(X_train, y_long)
+
+    # Save Long Model
     with open("models/model_3r.pkl", "wb") as f:
-        pickle.dump(model_3r, f)
-    with open("models/model_short_3r.pkl", "wb") as f:  # 🟢 NEW
-        pickle.dump(model_short_3r, f)
+        pickle.dump(model_long, f)
+    print("✅ Saved: models/model_3r.pkl")
 
-    print("\n✅ Both models saved!")
+    # ── 2. Train Short 3.5R Model ─────────────────────────────
+    print("📉 Training Short 3.5R Model...")
+    y_short = df_train['Target_Short_3R']
 
-    # Show probability distribution on last 20 days
-    print("\n=== Last 20 days confidence scores ===")
-    last_20 = X.iloc[-20:]
-    probs_3r = model_3r.predict_proba(last_20)[:, 1]
-    probs_short_3r = model_short_3r.predict_proba(
-        last_20)[:, 1]  # Updated variable
+    neg_short = (y_short == 0).sum()
+    pos_short = (y_short == 1).sum()
+    scale_pos_weight_short = neg_short / pos_short if pos_short > 0 else 1.0
 
-    prob_df = pd.DataFrame({
-        'Date': df.index[-20:],
-        'Long_3R_conf': probs_3r.round(3),
-        'Short_3R_conf': probs_short_3r.round(3),  # Updated variable
-        'Target_3R': df['Target_3R'].iloc[-20:].values,
-        # Updated variable
-        'Target_Short_3R': df['Target_Short_3R'].iloc[-20:].values
-    })
-    print(prob_df.to_string(index=False))
+    model_short = xgb.XGBClassifier(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.05,
+        random_state=42,
+        eval_metric='logloss',
+        scale_pos_weight=scale_pos_weight_short
+    )
+    model_short.fit(X_train, y_short)
 
-    # Show signal logic on latest data
-    print("\n=== Latest Signal ===")
-    latest = X.iloc[[-1]]
-    prob_3r = model_3r.predict_proba(latest)[0][1]
-    prob_short_3r = model_short_3r.predict_proba(
-        latest)[0][1]  # Updated variable
-
-    print(f"Long 3.5R confidence:  {prob_3r:.2%}")
-    print(f"Short 3.5R confidence: {prob_short_3r:.2%}")
-
-    # Updated signal logic to match backtest thresholds
-    if prob_3r >= 0.70 and prob_3r > prob_short_3r:
-        print("🚀 Signal: LONG — target 3.5R")
-    elif prob_short_3r >= 0.70 and prob_short_3r > prob_3r:
-        print("📉 Signal: SHORT — target 3.5R")
-    else:
-        print("⏸️  Signal: FLAT — no trade today")
-
-    print("\n=== Feature Importance (Long 3.5R Model) ===")
-    importance = pd.Series(
-        model_3r.feature_importances_,
-        index=FEATURES
-    ).sort_values(ascending=False)
-    print(importance)
+    # Save Short Model
+    with open("models/model_short_3r.pkl", "wb") as f:
+        pickle.dump(model_short, f)
+    print("✅ Saved: models/model_short_3r.pkl")
 
 
 if __name__ == "__main__":
-    train_model()
+    train_and_save_models()
+    print("\n🎉 Model pipeline successfully synchronized!")

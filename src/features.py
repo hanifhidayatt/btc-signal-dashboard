@@ -3,170 +3,180 @@ import pandas_ta as ta
 import yfinance as yf
 
 
-def fetch_macro_features():
+def fetch_coinbase_premium(start_date=None):
     """
-    Fetch global market sentiment indicators to improve prediction confidence.
-    ^GSPC: S&P 500 Index (Tracks global risk-on appetite)
-    UUP: Invesco DB US Dollar Index Bullish Fund (Weak USD tends to benefit BTC)
+    Coinbase Premium = BTC-USD (Coinbase) - BTC-USDT (Binance)
+    Positive = US buyers paying premium = bullish signal
+    Negative = selling pressure dominating
     """
-    print("Downloading Intermarket Macro Features (^GSPC, UUP)...")
-    sp500 = yf.download("^GSPC", period="10y", interval="1d", progress=False)
-    dxy = yf.download("UUP", period="10y", interval="1d", progress=False)
+    btc_coinbase = yf.download(
+        "BTC-USD", period="10y", interval="1d", progress=False)
+    btc_binance = yf.download("BTC-USDT", period="10y",
+                              interval="1d", progress=False)
 
-    # Flatten multi-level columns if present in yfinance return
-    if isinstance(sp500.columns, pd.MultiIndex):
-        sp500.columns = sp500.columns.get_level_values(0)
-    if isinstance(dxy.columns, pd.MultiIndex):
-        dxy.columns = dxy.columns.get_level_values(0)
+    # Flatten multi-level columns if present (yfinance v0.2+ quirk)
+    if isinstance(btc_coinbase.columns, pd.MultiIndex):
+        btc_coinbase.columns = btc_coinbase.columns.get_level_values(0)
+    if isinstance(btc_binance.columns, pd.MultiIndex):
+        btc_binance.columns = btc_binance.columns.get_level_values(0)
 
-    macro_df = pd.DataFrame(index=sp500.index)
-    macro_df['SP500_return'] = sp500['Close'].pct_change()
-    macro_df['DXY_return'] = dxy['Close'].pct_change()
+    premium = btc_coinbase['Close'] - btc_binance['Close']
+    premium.name = 'Coinbase_premium'
+    premium_pct = premium / btc_coinbase['Close']
+    premium_pct.name = 'Coinbase_premium_pct'
 
-    return macro_df
+    return pd.concat([premium, premium_pct], axis=1)
 
 
 def add_indicators(df):
-    # Flatten multi-level columns if needed (yfinance quirk)
+    # Flatten multi-level columns if needed
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    # --- CRITICAL FIX: Ensure all core columns are strictly numeric ---
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Drop any rows that failed conversion and became NaN
+    df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
 
     # --- Trend Indicators ---
     df['EMA_20'] = ta.ema(df['Close'], length=20)
     df['EMA_50'] = ta.ema(df['Close'], length=50)
-    df['MACD'] = ta.macd(df['Close'])['MACD_12_26_9']
-
-    # --- Market Regime Filter ---
     df['EMA_200'] = ta.ema(df['Close'], length=200)
-    df['Is_bull_market'] = (df['Close'] > df['EMA_200']).astype(int)
 
-    # --- Trend Strength ---
-    adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-    df['ADX'] = adx['ADX_14']
+    # MACD
+    macd_df = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+    df['MACD'] = macd_df.iloc[:, 0] if macd_df is not None else 0
 
-    # --- Momentum ---
+    # RSI
     df['RSI'] = ta.rsi(df['Close'], length=14)
 
-    # --- Volatility & ATR ---
-    bbands = ta.bbands(df['Close'], length=20)
-    bb_upper_col = [c for c in bbands.columns if 'BBU' in c][0]
-    bb_lower_col = [c for c in bbands.columns if 'BBL' in c][0]
-    df['BB_upper'] = bbands[bb_upper_col]
-    df['BB_lower'] = bbands[bb_lower_col]
-    df['BB_width'] = df['BB_upper'] - df['BB_lower']
+    # Bollinger Bands
+    bb_df = ta.bbands(df['Close'], length=20, std=2)
+    if bb_df is not None:
+        df['BB_upper'] = bb_df.iloc[:, 2]
+        df['BB_lower'] = bb_df.iloc[:, 0]
+        df['BB_width'] = (df['BB_upper'] - df['BB_lower']) / df['Close']
+    else:
+        df['BB_upper'], df['BB_lower'], df['BB_width'] = 0, 0, 0
 
-    # Added required missing features expected by model and backtest scripts
+    # ADX & ATR
+    adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df['ADX'] = adx_df.iloc[:, 0] if adx_df is not None else 0
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['ATR_pct'] = df['ATR'] / df['Close']
 
-    # --- Volume ---
+    # --- Candlestick Features & Helpers ---
     df['Volume_change'] = df['Volume'].pct_change()
+    df['Return_lag1'] = df['Close'].pct_change(1)
+    df['Return_lag2'] = df['Close'].pct_change(2)
+    df['Return_lag3'] = df['Close'].pct_change(3)
+    df['Return_lag5'] = df['Close'].pct_change(5)
 
-    # --- Lag features ---
-    for lag in [1, 2, 3, 5]:
-        df[f'Return_lag{lag}'] = df['Close'].pct_change(lag)
-
-    # --- Price vs moving average ratios ---
     df['Price_EMA20_ratio'] = df['Close'] / df['EMA_20']
     df['Price_EMA50_ratio'] = df['Close'] / df['EMA_50']
-    df['EMA_cross'] = df['EMA_20'] - df['EMA_50']
+    df['EMA_cross'] = (df['EMA_20'] > df['EMA_50']).astype(int)
+    df['Is_bull_market'] = (df['Close'] > df['EMA_200']).astype(int)
 
-    # --- Candle features ---
-    df['Body_size'] = abs(df['Close'] - df['Open'])
-    df['Upper_wick'] = df['High'] - df[['Close', 'Open']].max(axis=1)
-    df['Lower_wick'] = df[['Close', 'Open']].min(axis=1) - df['Low']
+    df['Body_size'] = (df['Close'] - df['Open']).abs() / df['Open']
+    df['Upper_wick'] = (
+        df['High'] - df[['Open', 'Close']].max(axis=1)) / df['Open']
+    df['Lower_wick'] = (df[['Open', 'Close']].min(
+        axis=1) - df['Low']) / df['Open']
     df['Is_green'] = (df['Close'] > df['Open']).astype(int)
 
-   # --- Forward looking R-multiple targets ---
-    R = 0.02  # 2% stop loss
-
+    # --- Target Label Calculation ---
+    R = 0.02
     target_3r = []
     target_5r = []
-    target_short_3r = []  # 🟢 NEW: Array for short targets
+    target_short_3r = []
 
-    closes = df['Close'].values
     highs = df['High'].values
     lows = df['Low'].values
+    closes = df['Close'].values
 
     for i in range(len(df)):
-        entry = closes[i]
+        if i >= len(df) - 10:
+            target_3r.append(0)
+            target_5r.append(0)
+            target_short_3r.append(0)
+            continue
 
-        # LONG targets
-        stop_long = entry * (1 - R)
-        tp_long_3r = entry * (1 + R * 3.5)
-        tp_long_5r = entry * (1 + R * 5.0)
+        entry_price = closes[i]
 
-        # SHORT targets
-        stop_short = entry * (1 + R)
-        tp_short_3r = entry * (1 - R * 3.5)
+        # 1. LONG TARGETS
+        long_stop = entry_price * (1 - R)
+        long_tp_3r = entry_price * (1 + R * 3.5)
+        long_tp_5r = entry_price * (1 + R * 5.0)
 
-        hit_long_3r = 0
-        hit_long_5r = 0
+        hit_3r = 0
+        hit_5r = 0
+
+        for j in range(i + 1, min(i + 11, len(df))):
+            high = highs[j]
+            low = lows[j]
+
+            if low <= long_stop:
+                break
+            if high >= long_tp_5r:
+                hit_5r = 1
+                hit_3r = 1
+                break
+            if high >= long_tp_3r:
+                hit_3r = 1
+
+        target_3r.append(hit_3r)
+        target_5r.append(hit_5r)
+
+        # 2. SHORT TARGETS
+        short_stop = entry_price * (1 + R)
+        short_tp_3r = entry_price * (1 - R * 3.5)
+
         hit_short_3r = 0
 
         for j in range(i + 1, min(i + 11, len(df))):
             high = highs[j]
             low = lows[j]
 
-            # --- LONG LOGIC ---
-            if low <= stop_long:  # Stopped out on long
+            if high >= short_stop:
                 break
-            if high >= tp_long_5r:
-                hit_long_5r = 1
-                hit_long_3r = 1
-                break
-            if high >= tp_long_3r:
-                hit_long_3r = 1
-
-        # We need a separate loop to independently check the short logic
-        for j in range(i + 1, min(i + 11, len(df))):
-            high = highs[j]
-            low = lows[j]
-
-            # --- SHORT LOGIC ---
-            if high >= stop_short:  # Stopped out on short (price spiked up)
-                break
-            if low <= tp_short_3r:  # Price crashed, hit short take profit
+            if low <= short_tp_3r:
                 hit_short_3r = 1
                 break
 
-        target_3r.append(hit_long_3r)
-        target_5r.append(hit_long_5r)
         target_short_3r.append(hit_short_3r)
 
     df['Target_3R'] = target_3r
     df['Target_5R'] = target_5r
-    df['Target_Short_3R'] = target_short_3r  # 🟢 NEW: Assign to dataframe
+    df['Target_Short_3R'] = target_short_3r
 
-    # --- Merge Intermarket Macro Features ---
-    macro_df = fetch_macro_features()
-    macro_df.index = pd.to_datetime(macro_df.index)
+    # --- Coinbase Premium Feature Merge ---
+    premium_df = fetch_coinbase_premium()
+    premium_df.index = pd.to_datetime(premium_df.index)
+    if isinstance(premium_df.index, pd.DatetimeIndex) and premium_df.index.tz is not None:
+        premium_df.index = premium_df.index.tz_localize(None)
+
     df.index = pd.to_datetime(df.index)
+    df = df.join(premium_df, how='left')
 
-    # Remove timezones from indices if present to prevent join misalignment
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
-    if macro_df.index.tz is not None:
-        macro_df.index = macro_df.index.tz_localize(None)
-
-    df = df.join(macro_df, how='left')
-
-    # Forward fill stock market indices to account for weekend gaps
-    df['SP500_return'] = df['SP500_return'].ffill().fillna(0)
-    df['DXY_return'] = df['DXY_return'].ffill().fillna(0)
+    df['Coinbase_premium'] = df['Coinbase_premium'].fillna(0)
+    df['Coinbase_premium_pct'] = df['Coinbase_premium_pct'].fillna(0)
 
     df.dropna(inplace=True)
     return df
 
 
 if __name__ == "__main__":
-    # Load raw 10y data and process
-    df = pd.read_csv("data/BTC_USD_10y.csv", header=[0, 1], index_col=0)
-    df = add_indicators(df)
-
-    print(df[['Close', 'RSI', 'MACD', 'EMA_20', 'ATR', 'SP500_return',
-          'DXY_return', 'Target_3R', 'Target_5R']].tail())
-    df.to_csv("data/BTC_USD_features.csv")
-    print(f"\nSaved features — {len(df)} rows, {len(df.columns)} columns")
-    print(f"3.5R trades available: {df['Target_3R'].sum()}")
-    print(f"5R trades available:   {df['Target_5R'].sum()}")
+    try:
+        # Explicitly ignore header text conflicts during load
+        raw_df = pd.read_csv("data/BTC_USD_10y.csv", index_col=0)
+        processed_df = add_indicators(raw_df)
+        processed_df.to_csv("data/BTC_USD_features.csv")
+        print(f"📊 Features built successfully! Shape: {processed_df.shape}")
+        print("Generated targets check:")
+        print(
+            processed_df[['Target_3R', 'Target_5R', 'Target_Short_3R']].sum())
+    except Exception as e:
+        print(f"Error building features: {e}")

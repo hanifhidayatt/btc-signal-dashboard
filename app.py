@@ -5,7 +5,6 @@ import xgboost as xgb
 import pickle
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import yfinance as yf
 
 # ── Page config ──────────────────────────────────────────────
 st.set_page_config(
@@ -58,6 +57,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Must perfectly match your features.py and model.py!
 FEATURES = [
     'EMA_20', 'EMA_50', 'MACD', 'RSI',
     'BB_upper', 'BB_lower', 'BB_width', 'Volume_change',
@@ -65,16 +65,10 @@ FEATURES = [
     'Price_EMA20_ratio', 'Price_EMA50_ratio', 'EMA_cross',
     'Body_size', 'Upper_wick', 'Lower_wick', 'Is_green',
     'EMA_200', 'Is_bull_market', 'ADX', 'ATR', 'ATR_pct',
-    'SP500_return', 'DXY_return'
+    'Coinbase_premium', 'Coinbase_premium_pct'
 ]
 
 R = 0.02
-
-
-def get_model_features(model):
-    if hasattr(model, "feature_names_in_"):
-        return list(model.feature_names_in_)
-    return model.get_booster().feature_names
 
 # ── Load data & models ────────────────────────────────────────
 
@@ -82,6 +76,7 @@ def get_model_features(model):
 @st.cache_data(ttl=3600)
 def load_data():
     df = pd.read_csv("data/BTC_USD_features.csv", index_col=0)
+    df.index = pd.to_datetime(df.index)
     return df
 
 
@@ -107,50 +102,28 @@ def run_backtest(df, _model_3r, _model_short_3r):
     X_test = X[test_mask]
     df_test = df[test_mask].copy()
 
-    X_train = X[train_mask]
-    y_3r_train = df['Target_3R'][train_mask]
-    y_short_3r_train = df['Target_Short_3R'][train_mask]
-
-    neg_3r = (y_3r_train == 0).sum()
-    pos_3r = (y_3r_train == 1).sum()
-    bt_model_3r = xgb.XGBClassifier(n_estimators=100, random_state=42,
-                                    eval_metric='logloss',
-                                    scale_pos_weight=neg_3r/pos_3r)
-    bt_model_3r.fit(X_train, y_3r_train)
-
-    neg_short = (y_short_3r_train == 0).sum()
-    pos_short = (y_short_3r_train == 1).sum()
-    bt_model_short_3r = xgb.XGBClassifier(n_estimators=100, random_state=42,
-                                          eval_metric='logloss',
-                                          scale_pos_weight=neg_short/pos_short)
-    bt_model_short_3r.fit(X_train, y_short_3r_train)
-
-    probs_3r = bt_model_3r.predict_proba(X_test)[:, 1]
-    probs_short_3r = bt_model_short_3r.predict_proba(X_test)[:, 1]
+    probs_3r = _model_3r.predict_proba(X_test)[:, 1]
+    probs_short_3r = _model_short_3r.predict_proba(X_test)[:, 1]
 
     trades = []
     last_trade_day = -999
     last_result = None
 
     for i in range(len(X_test)):
-        sp500_ret = df_test['SP500_return'].iloc[i]
-        dxy_ret = df_test['DXY_return'].iloc[i]
-
-        if sp500_ret < -0.015 or dxy_ret > 0.008:
-            continue
-
+        # Cooldown filter: Don't revenge trade right after a loss
         if last_result == 'LOSS' and (i - last_trade_day) < 3:
             continue
 
         p3r = probs_3r[i]
         pshort3r = probs_short_3r[i]
 
+        # Signal Logic
         if p3r >= 0.70 and p3r > pshort3r:
-            signal = 'LONG_3.5R'
+            signal = 'LONG 3.5R'
             reward = R * 3.5
             target_hit = df_test['Target_3R'].iloc[i]
         elif pshort3r >= 0.70 and pshort3r > p3r:
-            signal = 'SHORT_3.5R'
+            signal = 'SHORT 3.5R'
             reward = R * 3.5
             target_hit = df_test['Target_Short_3R'].iloc[i]
         else:
@@ -162,10 +135,10 @@ def run_backtest(df, _model_3r, _model_short_3r):
         last_result = result
 
         trades.append({
-            'Date': df_test.index[i],
+            'Date': df_test.index[i].strftime('%Y-%m-%d'),
             'Signal': signal,
-            'Confidence_Long_3R': round(p3r, 3),
-            'Confidence_Short_3R': round(pshort3r, 3),
+            'Conf_Long': round(p3r, 3),
+            'Conf_Short': round(pshort3r, 3),
             'Result': result,
             'PnL_R': round(pnl / R, 2)
         })
@@ -176,7 +149,6 @@ def run_backtest(df, _model_3r, _model_short_3r):
 # ── App ───────────────────────────────────────────────────────
 df = load_data()
 model_3r, model_short_3r = load_models()
-MODEL_FEATURES = get_model_features(model_3r)
 
 # Header
 st.markdown("## ₿ BTC Signal Dashboard")
@@ -201,7 +173,7 @@ if p3r >= 0.70 and p3r > pshort3r:
 elif pshort3r >= 0.70 and pshort3r > p3r:
     signal_label = "📉 SHORT"
     signal_class = "signal-sell"
-    signal_detail = f"Target 3.5R (+{R*3.5*100:.0f}%) | Stop -{R*100:.0f}%"
+    signal_detail = f"Target 3.5R (-{R*3.5*100:.0f}%) | Stop +{R*100:.0f}%"
 else:
     signal_label = "⏸ FLAT"
     signal_class = "signal-flat"
@@ -227,14 +199,14 @@ with col2:
 with col3:
     st.markdown(f"""
     <div class='metric-card'>
-        <div class='label'>Long Conf. (3.5R)</div>
+        <div class='label'>Long Conf.</div>
         <div class='value'>{p3r:.1%}</div>
     </div>""", unsafe_allow_html=True)
 
 with col4:
     st.markdown(f"""
     <div class='metric-card'>
-        <div class='label'>Short Conf. (3.5R)</div>
+        <div class='label'>Short Conf.</div>
         <div class='value'>{pshort3r:.1%}</div>
     </div>""", unsafe_allow_html=True)
 
@@ -250,7 +222,6 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 # ── BTC Price Chart ───────────────────────────────────────────
 st.markdown("### Price Chart with Indicators")
-
 chart_df = df.tail(180).copy()
 
 fig = make_subplots(
@@ -270,31 +241,24 @@ fig.add_trace(go.Candlestick(
 ), row=1, col=1)
 
 # EMAs
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_20'],
-                         line=dict(color='#58a6ff', width=1.5), name='EMA 20'), row=1, col=1)
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_50'],
-                         line=dict(color='#f0883e', width=1.5), name='EMA 50'), row=1, col=1)
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_200'],
-                         line=dict(color='#bc8cff', width=1.5, dash='dash'), name='EMA 200'), row=1, col=1)
-
-# Bollinger Bands
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['BB_upper'],
-                         line=dict(color='#8b949e', width=1, dash='dot'), name='BB Upper'), row=1, col=1)
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['BB_lower'],
-                         line=dict(color='#8b949e', width=1, dash='dot'), name='BB Lower',
-                         fill='tonexty', fillcolor='rgba(139,148,158,0.05)'), row=1, col=1)
+fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_20'], line=dict(
+    color='#58a6ff', width=1.5), name='EMA 20'), row=1, col=1)
+fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_50'], line=dict(
+    color='#f0883e', width=1.5), name='EMA 50'), row=1, col=1)
+fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['EMA_200'], line=dict(
+    color='#bc8cff', width=1.5, dash='dash'), name='EMA 200'), row=1, col=1)
 
 # RSI
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['RSI'],
-                         line=dict(color='#58a6ff', width=1.5), name='RSI'), row=2, col=1)
+fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['RSI'], line=dict(
+    color='#58a6ff', width=1.5), name='RSI'), row=2, col=1)
 fig.add_hline(y=70, line_color='#f85149',
               line_dash='dash', line_width=1, row=2, col=1)
 fig.add_hline(y=30, line_color='#3fb950',
               line_dash='dash', line_width=1, row=2, col=1)
 
 # ADX
-fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['ADX'],
-                         line=dict(color='#f0883e', width=1.5), name='ADX'), row=3, col=1)
+fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['ADX'], line=dict(
+    color='#f0883e', width=1.5), name='ADX'), row=3, col=1)
 fig.add_hline(y=25, line_color='#8b949e',
               line_dash='dash', line_width=1, row=3, col=1)
 
@@ -319,7 +283,6 @@ trades_df = run_backtest(df, model_3r, model_short_3r)
 
 if not trades_df.empty:
     wins = (trades_df['Result'] == 'WIN').sum()
-    losses = (trades_df['Result'] == 'LOSS').sum()
     total = len(trades_df)
     win_rate = wins / total
     total_r = trades_df['PnL_R'].sum()
@@ -358,9 +321,8 @@ if not trades_df.empty:
 
     # Trade history table
     st.markdown("### Trade History")
-    styled = trades_df[['Date', 'Signal', 'Confidence_Long_3R',
-                        'Confidence_Short_3R', 'Result', 'PnL_R']].copy()
+    styled = trades_df[['Date', 'Signal', 'Conf_Long',
+                        'Conf_Short', 'Result', 'PnL_R']].copy()
     styled['Result'] = styled['Result'].apply(
-        lambda x: f"✅ WIN" if x == 'WIN' else "❌ LOSS"
-    )
+        lambda x: f"✅ WIN" if x == 'WIN' else "❌ LOSS")
     st.dataframe(styled, use_container_width=True, hide_index=True)
