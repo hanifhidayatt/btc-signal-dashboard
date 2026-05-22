@@ -9,7 +9,7 @@ FEATURES = [
     'Return_lag1', 'Return_lag2', 'Return_lag3', 'Return_lag5',
     'Price_EMA20_ratio', 'Price_EMA50_ratio', 'EMA_cross',
     'Body_size', 'Upper_wick', 'Lower_wick', 'Is_green',
-    'EMA_200', 'Is_bull_market', 'ADX'
+    'EMA_200', 'Is_bull_market', 'ADX', 'ATR', 'ATR_pct'
 ]
 
 R = 0.02

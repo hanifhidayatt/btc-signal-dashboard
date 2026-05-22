@@ -1,5 +1,6 @@
 import pandas as pd
 import pandas_ta as ta
+import yfinance as yf
 
 
 def add_indicators(df):
@@ -23,13 +24,17 @@ def add_indicators(df):
     # --- Momentum ---
     df['RSI'] = ta.rsi(df['Close'], length=14)
 
-    # --- Volatility ---
+    # --- Volatility & ATR ---
     bbands = ta.bbands(df['Close'], length=20)
     bb_upper_col = [c for c in bbands.columns if 'BBU' in c][0]
     bb_lower_col = [c for c in bbands.columns if 'BBL' in c][0]
     df['BB_upper'] = bbands[bb_upper_col]
     df['BB_lower'] = bbands[bb_lower_col]
     df['BB_width'] = df['BB_upper'] - df['BB_lower']
+
+    # Calculate ATR (which was missing but required by models)
+    df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+    df['ATR_pct'] = df['ATR'] / df['Close']
 
     # --- Volume ---
     df['Volume_change'] = df['Volume'].pct_change()
@@ -89,14 +94,22 @@ def add_indicators(df):
     df['Target_3R'] = target_3r
     df['Target_5R'] = target_5r
 
+    # Clean up dates and drop missing rows caused by indicator lookbacks
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
     df.dropna(inplace=True)
-    return df  # ← this was missing!
+    return df
 
 
 if __name__ == "__main__":
+    # Load raw 10y data and parse columns correctly
     df = pd.read_csv("data/BTC_USD_10y.csv", header=[0, 1], index_col=0)
     df = add_indicators(df)
-    print(df[['Close', 'RSI', 'MACD', 'EMA_20', 'Target_3R', 'Target_5R']].tail())
+
+    print(df[['Close', 'RSI', 'MACD', 'EMA_20',
+          'ATR', 'Target_3R', 'Target_5R']].tail())
     df.to_csv("data/BTC_USD_features.csv")
     print(f"\nSaved features — {len(df)} rows, {len(df.columns)} columns")
     print(f"3.5R trades available: {df['Target_3R'].sum()}")

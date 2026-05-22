@@ -1,6 +1,6 @@
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score
 import xgboost as xgb
 import pickle
 import os
@@ -11,7 +11,7 @@ FEATURES = [
     'Return_lag1', 'Return_lag2', 'Return_lag3', 'Return_lag5',
     'Price_EMA20_ratio', 'Price_EMA50_ratio', 'EMA_cross',
     'Body_size', 'Upper_wick', 'Lower_wick', 'Is_green',
-    'EMA_200', 'Is_bull_market', 'ADX'
+    'EMA_200', 'Is_bull_market', 'ADX', 'ATR', 'ATR_pct'
 ]
 
 
@@ -105,9 +105,6 @@ def train_model(csv_path="data/BTC_USD_features.csv"):
         print("✅ Signal: LONG — target 3.5R")
     else:
         print("⏸️  Signal: FLAT — no trade today")
-
-# --- Feature Importance ---
-    import plotly.express as px
 
     print("\n=== Feature Importance (3.5R Model) ===")
     importance = pd.Series(
